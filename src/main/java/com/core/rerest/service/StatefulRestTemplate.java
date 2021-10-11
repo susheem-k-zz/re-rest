@@ -19,13 +19,18 @@ import org.springframework.web.util.UriComponentsBuilder;
 import java.net.URI;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
 @Component
 @SuppressWarnings("ALL")
 public class StatefulRestTemplate {
 
+    private final ReentrantLock lock = new ReentrantLock(true);
+
     private final RestTemplate restTemplate;
+
     private final ActiveRestRequestsContainer requestsContainer;
 
     @Autowired
@@ -34,21 +39,31 @@ public class StatefulRestTemplate {
         this.requestsContainer = new ActiveRestRequestsContainer();
     }
 
-    public <T> ResponseEntity<T> doGet(final String url, final MultiValueMap<String, String> queryParams, final MultiValueMap<String, String> headers, final Class<T> responseType) throws ExecutionException, InterruptedException {
+    public <T> ResponseEntity<T> doGet(final String url, final MultiValueMap<String, String> queryParams,
+                                       final MultiValueMap<String, String> headers, final Class<T> responseType)
+            throws ExecutionException, InterruptedException {
         final URI uri = UriComponentsBuilder.fromHttpUrl(url).queryParams(queryParams).build().toUri();
         final RequestEntity<Object> requestEntity = new RequestEntity<>(headers, HttpMethod.GET, uri);
-        final Pair<RestResponseResolutionStrategy, CompletableFuture<ResponseEntity<?>>> resolutionStrategyAndResponseHandlePair = submitRequestToContainerAndGetResolutionStrategy(requestEntity);
-        return handleResolutionStrategyAndGetResponse(requestEntity, resolutionStrategyAndResponseHandlePair, responseType);
+        final Pair<RestResponseResolutionStrategy, CompletableFuture<ResponseEntity<?>>>
+                resolutionStrategyAndResponseHandlePair =
+                acquireLockAndUpsertTheRequestToContainerAndGetResolutionStrategy(requestEntity);
+        return handleResolutionStrategyAndGetResponse(requestEntity, resolutionStrategyAndResponseHandlePair,
+                                                      responseType);
     }
 
-    private <T> ResponseEntity<T> handleResolutionStrategyAndGetResponse(final RequestEntity<Object> requestEntity, final Pair<RestResponseResolutionStrategy, CompletableFuture<ResponseEntity<?>>> resolutionStrategyAndResponseHandlePair, final Class<T> clazz) throws ExecutionException, InterruptedException {
-        if (resolutionStrategyAndResponseHandlePair.getKey() == RestResponseResolutionStrategy.PROCEED_WITH_INVOCATION) {
+    private <T> ResponseEntity<T> handleResolutionStrategyAndGetResponse(final RequestEntity<Object> requestEntity,
+                                                                         final Pair<RestResponseResolutionStrategy, CompletableFuture<ResponseEntity<?>>> resolutionStrategyAndResponseHandlePair,
+                                                                         final Class<T> clazz)
+            throws ExecutionException, InterruptedException {
+        if (resolutionStrategyAndResponseHandlePair.getKey() ==
+            RestResponseResolutionStrategy.PROCEED_WITH_INVOCATION) {
             return doProceedAndNotifyObservers(requestEntity, clazz);
         }
         return (ResponseEntity<T>) resolutionStrategyAndResponseHandlePair.getValue().get();
     }
 
-    private <T> ResponseEntity<T> doProceedAndNotifyObservers(final RequestEntity<Object> requestEntity, final Class<T> clazz) {
+    private <T> ResponseEntity<T> doProceedAndNotifyObservers(final RequestEntity<Object> requestEntity,
+                                                              final Class<T> clazz) {
         final ResponseEntity<T> responseEntity = restTemplate.exchange(requestEntity, clazz);
         try {
             requestsContainer.doNotifyAllObservers(responseEntity, JsonUtil.convertToJsonString(requestEntity));
@@ -58,7 +73,8 @@ public class StatefulRestTemplate {
         return responseEntity;
     }
 
-    private Pair<RestResponseResolutionStrategy, CompletableFuture<ResponseEntity<?>>> submitRequestToContainerAndGetResolutionStrategy(final RequestEntity<Object> requestEntity) {
+    private Pair<RestResponseResolutionStrategy, CompletableFuture<ResponseEntity<?>>> submitRequestToContainerAndGetResolutionStrategy(
+            final RequestEntity<Object> requestEntity) {
         final String stringifiedRequest;
         try {
             stringifiedRequest = JsonUtil.convertToJsonString(requestEntity);
@@ -71,5 +87,19 @@ public class StatefulRestTemplate {
         return requestsContainer.registerRequestAsObserverAndProvideResponseResolutionStrategy(stringifiedRequest);
     }
 
+    public Pair<RestResponseResolutionStrategy, CompletableFuture<ResponseEntity<?>>> acquireLockAndUpsertTheRequestToContainerAndGetResolutionStrategy(
+            final RequestEntity<Object> requestEntity) throws InterruptedException {
+        boolean isLockAcquired = lock.tryLock(10, TimeUnit.MICROSECONDS);
+        if (isLockAcquired) {
+            try {
+                return this.submitRequestToContainerAndGetResolutionStrategy(requestEntity);
+            } finally {
+                lock.unlock();
+            }
+
+        } else {
+            return new Pair<>(RestResponseResolutionStrategy.PROCEED_WITH_INVOCATION, null);
+        }
+    }
 
 }
