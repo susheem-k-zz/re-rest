@@ -87,7 +87,7 @@ public class StatefulRestTemplate {
         return requestsContainer.registerRequestAsObserverAndProvideResponseResolutionStrategy(stringifiedRequest);
     }
 
-    public Pair<RestResponseResolutionStrategy, CompletableFuture<ResponseEntity<?>>> acquireLockAndUpsertTheRequestToContainerAndGetResolutionStrategy(
+    private Pair<RestResponseResolutionStrategy, CompletableFuture<ResponseEntity<?>>> acquireLockAndUpsertTheRequestToContainerAndGetResolutionStrategy(
             final RequestEntity<Object> requestEntity) throws InterruptedException {
         boolean isLockAcquired = lock.tryLock(10, TimeUnit.MICROSECONDS);
         if (isLockAcquired) {
